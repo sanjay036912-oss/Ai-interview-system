@@ -11,7 +11,7 @@ ai-interview-system/
 ├── backend/
 │   ├── app/
 │   │   ├── main.py          # FastAPI app, routes, lifecycle
-│   │   └── database.py      # PostgreSQL connection and schema
+│   │   └── database.py      # SQLite connection and schema
 │   ├── rag/
 │   │   ├── ingest.py        # Document chunking and FAISS indexing
 │   │   ├── retrieve.py      # Vector similarity search
@@ -19,7 +19,8 @@ ai-interview-system/
 │   │   └── skills.py        # Resume skill extraction
 │   ├── utils/
 │   │   └── parser.py        # PDF text extraction
-│   └── .env                 # Environment variables
+│   ├── requirements.txt
+│   └── .env
 └── frontend/
     └── src/
         ├── components/
@@ -43,7 +44,7 @@ ai-interview-system/
 | LLM | LLaMA 3 via Ollama (local) |
 | Embeddings | sentence-transformers (all-MiniLM-L6-v2) |
 | Vector Search | FAISS |
-| Database | PostgreSQL |
+| Database | SQLite |
 | PDF Parsing | PyMuPDF |
 
 ---
@@ -51,7 +52,7 @@ ai-interview-system/
 ## Key Design Decisions
 
 ### RAG Pipeline
-- **Two separate FAISS indexes** — one for the knowledge base (ML/backend books), one for the resume
+- **Two separate FAISS indexes** — one for the knowledge base (ML/backend concepts), one for the resume
 - **Chunking strategy** — 500-word chunks with 50-word overlap for context preservation
 - **Dynamic query construction** — role + extracted skills used as the retrieval query
 - Knowledge base is loaded once at startup; resume is indexed per upload
@@ -61,9 +62,15 @@ ai-interview-system/
 - Temperature set to 0.7 for variety, `num_predict` capped at 80 tokens
 - Prompt enforces single-sentence questions ending with `?`
 
+### Database
+- SQLite for zero-configuration persistence
+- Auto-created on first startup as `interview.db`
+- Three tables: `sessions`, `questions`, `answers`
+- Questions store the context chunk used to generate them (full traceability)
+
 ### Session Management
-- Each session stored in PostgreSQL with role, skills, questions, and answers
-- Questions store the context chunk used to generate them (traceability)
+- Each session scoped by UUID stored in SQLite
+- Skills stored per session — no global state
 - Answer analysis runs at summary time using the same LLM
 
 ---
@@ -73,13 +80,12 @@ ai-interview-system/
 ### Prerequisites
 - Python 3.11+
 - Node.js 18+
-- PostgreSQL running locally
 - [Ollama](https://ollama.com) installed
 
 ### 1. Clone the repository
 ```bash
-git clone https://github.com/your-username/ai-interview-system.git
-cd ai-interview-system
+git clone https://github.com/sanjay036912-oss/Ai-interview-system.git
+cd Ai-interview-system
 ```
 
 ### 2. Backend setup
@@ -98,37 +104,30 @@ pip install -r requirements.txt
 ### 3. Configure environment
 Create a `.env` file in `backend/`:
 ```env
-DB_HOST=localhost
-DB_PORT=5432
-DB_NAME=interview_db
-DB_USER=postgres
-DB_PASSWORD=your_password_here
-
+DB_PATH=interview.db
 OLLAMA_URL=http://localhost:11434
 OLLAMA_MODEL=llama3
+APP_ENV=development
+APP_PORT=8000
 ```
 
-### 4. Set up PostgreSQL
-```sql
-CREATE DATABASE interview_db;
-```
-Tables are created automatically on first startup.
-
-### 5. Set up Ollama
+### 4. Set up Ollama
 ```bash
 # Install from https://ollama.com, then:
 ollama pull llama3
 ollama serve
 ```
 
-### 6. Start the backend
+### 5. Start the backend
 ```bash
 cd backend
 uvicorn app.main:app --reload
 ```
 Backend runs at `http://localhost:8000`
 
-### 7. Frontend setup
+> SQLite database `interview.db` is created automatically on first startup. No database setup needed.
+
+### 6. Frontend setup
 ```bash
 cd frontend
 npm install
@@ -145,15 +144,15 @@ Candidate uploads resume (PDF)
         ↓
 Resume parsed → skills extracted → resume indexed in FAISS
         ↓
-Candidate selects role → session created in PostgreSQL
+Candidate selects role → session created in SQLite
         ↓
 Role + skills → query knowledge base (FAISS) → retrieve relevant chunks
         ↓
-Retrieved context + skills → LLM → generate focused question
+Retrieved context + skills → LLaMA 3 → generate focused question
         ↓
-Question stored in DB → displayed to candidate
+Question stored in SQLite → displayed to candidate
         ↓
-Candidate answers → answer stored in DB
+Candidate answers → answer stored in SQLite
         ↓
 Repeat for 5 questions
         ↓
@@ -170,7 +169,39 @@ Summary: LLM evaluates each answer → score + feedback + missing concepts
 | POST | `/start` | Create a new interview session |
 | GET | `/question` | Generate and retrieve next question |
 | POST | `/answer` | Submit answer for current question |
-| GET | `/summary` | Get full session analysis |
+| GET | `/summary` | Get full session analysis with scores |
+
+---
+
+## Database Schema
+
+```sql
+-- Stores each interview session
+CREATE TABLE sessions (
+    id TEXT PRIMARY KEY,
+    role TEXT NOT NULL,
+    skills TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Stores generated questions with context traceability
+CREATE TABLE questions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    question TEXT NOT NULL,
+    context_used TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Stores candidate answers
+CREATE TABLE answers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    question_id INTEGER NOT NULL,
+    answer TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+```
 
 ---
 
@@ -178,7 +209,8 @@ Summary: LLM evaluates each answer → score + feedback + missing concepts
 
 - Resume-aware question generation (skills influence topic and difficulty)
 - RAG pipeline with FAISS vector search and chunked knowledge base
-- Per-answer scoring (1–10) with qualitative feedback
-- Session persistence in PostgreSQL
-- Clean 4-step UI with progress tracking
+- Per-answer scoring (1–10) with qualitative feedback and missing concept detection
+- Session persistence in SQLite — survives server restarts
+- Clean 4-step UI: Upload → Role → Interview → Summary
 - Modular backend with clear separation of concerns
+- All configuration via environment variables
